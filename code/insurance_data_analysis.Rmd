@@ -1,0 +1,261 @@
+---
+title: "Exploratory Data Analysis"
+author: "David Sprague"
+date: "2024-01-20"
+output:
+  html_document:
+    theme: paper
+    toc: yes
+    toc_float: yes
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Health Insurance Rates in the USA
+
+### Introduction 
+
+In this exploratory data analysis, I look at the percentage of people aged 19-34 in each state in the United States that have at least one form of health insurance. The objective of this study is to closely look at the geographic patterns and distribution of people with health insurance. Health care in the united states can be far more expensive than most people can reasonably afford. While health care is not always affordable, it is a way to reduce costs for health care. Many full-time jobs offer health insurance options but for those that do not and for people who are unemployed, it can be costly to buy health insurance. 
+
+
+### Data Preparation 
+```{r libraries, message = FALSE, warning = FALSE}
+# Load libraries
+library(sf)
+library(tidyverse)
+library(spdep)
+library(kableExtra)
+library(tmap)
+```
+
+
+
+
+```{r data_prep, message = FALSE, warning = FALSE}
+## Read in 2020 health insurance data 
+insurance_data <- read_csv(file = "../raw_data/usa_health_insurance_data.csv")
+
+
+## Read in Spatial data layer
+states <- read_sf("../raw_data/usa_states.gpkg")
+
+
+## Select columns needed from insurance data
+insurance_data <- insurance_data |> select(c(GEOID, 
+                                            B27010_018E, 
+                                            B27010_019E))
+## Rename columns in insurance data table 
+insurance_data <- insurance_data |> rename(population_19_34 = B27010_018E,
+                                           people_with_health_insurance = B27010_019E)
+
+## Create column for percentage of people who have health insurance in each state aged 19-34
+insurance_data <- insurance_data |> mutate(percent_has_insurance = people_with_health_insurance / population_19_34 * 100)
+
+
+## Select only GEOID,  GEOM, and NAME columns from spatial data layer
+states <- states |> select(GEOID, NAME, geom)
+
+
+## Join spatial data layer with insurance data
+joined_insurance_spatial_data <- left_join(states, insurance_data, by = "GEOID")
+
+## Remove any rows containing NA values
+joined_insurance_spatial_data <- joined_insurance_spatial_data |> na.omit()
+```
+
+
+For this data analysis, I sourced my health insurance data from the American Community Survey API. The spatial data layer for the United States was acquired through the 'Tigris' library. Processing the data involved selecting necessary columns from the ACS which included the total number of people aged 19-34 with health insurance in each State. To improve readability of the table, I gave the columns meaningful names. A new column was created to represent the percentage of individuals who have health insurance in each state(19-34 years old). The last step of wrangling the data involved data alignment, ensuring that the health insurance and spatial data tables would properly join using a left table join. 
+
+***
+
+### Exploratory Spatial Data Analysis
+
+
+#### Data Summary
+```{r data_summary, message = FALSE, warning = FALSE}
+## Calculate number of rows 
+num_obs <- joined_insurance_spatial_data |> nrow()
+
+
+## Calculate the minimum percent for people with insurance in each state
+min_percent <- min(joined_insurance_spatial_data$percent_has_insurance) |> round(2)
+
+
+## Calculate the maximum percent for people with insurance in each state
+max_percent <- max(joined_insurance_spatial_data$percent_has_insurance) |> round(2)
+
+
+## Calculate the mean percentage for people with insurance in each state
+mean_percent <- mean(joined_insurance_spatial_data$percent_has_insurance) |> round(2)
+
+
+## Calculate standard deviation for 2020
+standard_deviation <- sd(joined_insurance_spatial_data$percent_has_insurance) |> round(2)
+
+
+## Create histogram for percentage of people with insurance in each state
+## Create histogram for 2020
+joined_insurance_spatial_data |> 
+  ggplot(mapping = aes(x = joined_insurance_spatial_data$percent_has_insurance)) +
+  geom_histogram(binwidth = 1,
+                 color = "black",
+                 fill = "lightblue") +
+  labs(title = "United States Health Insurance",
+       y = "Number of States",
+       x = "% of people that have at least one form of health insurance") + 
+  theme_classic()
+```
+
+The variable of interst in this data analysis is the percentage of people aged 19-34 in each state in the United States that has at least one form of health insurance in the year 2020. The data set had `r num_obs` observations. In 2020, the minimum, maximum, and mean percentage of people who had health insurance was `r min_percent`, `r max_percent`, and `r mean_percent` The standard deviation was `r standard_deviation` From the histogram, we can see that the data is fairly left skewed. 
+
+
+***
+
+#### Geographic Distribution and Clustering
+```{r map, message = FALSE, warning = FALSE}
+## Create Queen case neighbors
+US_queen_neighbors <- poly2nb(joined_insurance_spatial_data,
+                    queen = TRUE)
+
+
+## Convert neighbors to weight matrix 
+US_queen_weights <- nb2listw(US_queen_neighbors,
+                         style = "B",         
+                         zero.policy = TRUE)
+
+
+## Moran's I Analysis
+US_insurance_morans <- moran.test(joined_insurance_spatial_data$percent_has_insurance,      
+                             US_queen_weights,          
+                             zero.policy = TRUE,    
+                             randomisation = TRUE)  
+
+
+## Store Moran's I value for percentage of people who have insurance 
+US_morans <- US_insurance_morans$estimate[1] |> as.double() |> round(4)
+
+
+## Calculate LISA statistic for percentage of people who have insurance
+US_lisa_statistic <- localmoran(joined_insurance_spatial_data$percent_has_insurance,
+                          listw = US_queen_weights,      
+                          alternative = "two.sided", 
+                          zero.policy = TRUE) |>     
+  as_tibble() |>                                     
+  mutate(across(everything(), as.vector))
+
+
+## Add values required for LISA category
+US_lisa_statistic <- US_lisa_statistic |>
+  mutate(SCVAR =  scale(joined_insurance_spatial_data$percent_has_insurance) |> as.vector(),
+         LAGVAR = lag.listw(US_queen_weights, scale(joined_insurance_spatial_data$percent_has_insurance)),
+         LISACAT = case_when(SCVAR >= 0 & LAGVAR >= 0 & `Pr(z != E(Ii))` <= 0.05 ~ 1,
+                             SCVAR <= 0 & LAGVAR <= 0 & `Pr(z != E(Ii))` <= 0.05 ~ 2,
+                             SCVAR >= 0 & LAGVAR <= 0 & `Pr(z != E(Ii))` <= 0.05 ~ 3,
+                             SCVAR <= 0 & LAGVAR >= 0 & `Pr(z != E(Ii))` <= 0.05 ~ 4,
+                             `Pr(z != E(Ii))` > 0.05 ~ 5))
+
+
+## Add label based on the values
+US_lisa_statistic <- US_lisa_statistic |>
+  mutate(CATNAME = case_when(LISACAT == 1 ~ "High-High",
+                             LISACAT == 2 ~ "Low-Low",
+                             LISACAT == 3 ~ "High-Low",
+                             LISACAT == 4 ~ "Low-High",
+                             LISACAT == 5 ~ "Not Significant"))
+
+
+## Add LISA category column to the spatial data for mapping
+joined_insurance_spatial_data <- joined_insurance_spatial_data |>
+  mutate(LISACAT = US_lisa_statistic$LISACAT,
+         CATNAME = US_lisa_statistic$CATNAME)
+
+
+## Count for LISA high-high states
+hh_count <- table(US_lisa_statistic$CATNAME)["High-High"] |> as.integer()
+
+
+
+## Count for LISA low-low states 
+lh_count <- table(US_lisa_statistic$CATNAME)["Low-Low"] |> as.integer()
+
+
+## Create kable table to summarize lisa results and add header above
+US_lisa_statistic$CATNAME |> 
+      table() |> 
+      kable(col.names = c("Outliers", "Frequency"), 
+            align = "l") |>
+      kable_styling(bootstrap_options = c("striped", 
+                                          "hover", 
+                                          "condensed", 
+                                          "responsive"),
+                    full_width = T) |> add_header_above(c("Lisa Results" = 2), align = "left")
+
+
+## Adjust tmap mode to be "view" 
+tmap_mode("view")
+
+## Change na values in LISACAT column to be 5(Not significant)
+joined_insurance_spatial_data$LISACAT[is.na(joined_insurance_spatial_data$LISACAT)] <- 5
+
+
+
+## Make choropleth map for percentage of people with health insurance 
+health_insurance_map <- joined_insurance_spatial_data |>
+  tm_shape() +
+    tm_polygons(col = "percent_has_insurance",
+              title = "People with health insurance (%)", 
+              style = "jenks",
+              colorNA = "white",
+              alpha = 0.9,
+              border.col = "black",
+              border.alpha = 0.3,
+              id = "NAME",
+              palette = "Greens") +
+    tm_layout(frame = FALSE, 
+              main.title = "Health insurance in the US",
+              main.title.size = 1.7, 
+              legend.outside = TRUE) 
+
+
+## Construct the LISA map
+lisa_map <- tm_shape(joined_insurance_spatial_data) +
+  tm_polygons(col = "grey50") +
+tm_shape(joined_insurance_spatial_data) + 
+  tm_polygons("LISACAT", 
+              title = "LISA Category",
+              breaks = c(1, 2, 3, 4, 5, 6),
+              palette =  c("red", 
+                           "blue", 
+                           "lightpink", 
+                           "skyblue", 
+                           "grey90"),
+              colorNA = "white",
+              labels = c("High-High", 
+                         "Low-Low",
+                         "High-Low",
+                         "Low-High", 
+                         "Not significant"),
+              border.col = "black", 
+              id = "NAME",
+              border.alpha = 0.25) +
+  tm_layout(frame = FALSE,
+            legend.outside = TRUE)
+
+
+## Map the two maps synced in view mode 
+tmap_arrange(health_insurance_map, 
+             lisa_map,
+             ncol = 2,
+             nrow = 1, 
+             sync = TRUE)
+```
+
+
+### Conclusions
+
+
+
